@@ -32,6 +32,7 @@ const int SENSOR_LOW_VALUE = 100;                // Dark threshold value
 const int SENSOR_HIGH_VALUE = 700;               // Bright threshold value
 const int SENSOR_SMOOTH_READINGS_DEFAULT = 3;    // Speed at which the brighness adapts to changes
 const double SENSOR_RANGE = (double)(SENSOR_HIGH_VALUE - SENSOR_LOW_VALUE);
+const double DIM_STEPS = (double) 20.0;
 
 // Define the digital value we expect when the button is *pressed* 
 const int BUTTON_ACTIVE = 0;                     // 1 = with pull down, 0 = with pull up
@@ -42,32 +43,31 @@ const int BUTTON_ACTIVE = 0;                     // 1 = with pull down, 0 = with
 //**********************************************************************************
 //**********************************************************************************
 // Controls the digit drive
-const int anode1 = 10;
+const int anode1 = 10;     // Package pin 16
 
 // pin used to drive the DC-DC converter
-const int hvDriverPin = 9;
+const int hvDriverPin = 9; // Package pin 4
 
 // Internal (inside the box) tick led 
-const int tickLed = 5; // PWM capable
+const int tickLed = 5;     // Package pin 11 // PWM capable
 
 // SN74141
-const int ledPin_0_a = 2;
-const int ledPin_0_b = 4;
-const int ledPin_0_c = 7;
-const int ledPin_0_d = 8;
+const int ledPin_0_a = 2;  // Package pin 4
+const int ledPin_0_b = 3;  // Package pin 5
+const int ledPin_0_c = 7;  // Package pin 13
+const int ledPin_0_d = 8;  // Package pin 14
 
 // HV sense analogue input
-const int sensorPin = A0;
+const int sensorPin = A0;  // Package pin 23
 
 // LDR sense analogue input
-const int LDRPin = A3;
-// const int LDRPin = A1;
+const int LDRPin = A3;     // Package pin 26
 
 // button input
-//const int inputPin1 = 5; // mins
-//const int inputPin2 = 6; // hours
-const int inputPin1 = A1; // mins
-const int inputPin2 = A2; // hours
+const int inputPin1 = A1;  // Package pin 24 // mins
+const int inputPin2 = A2;  // Package pin 25 // hours
+
+const int pirInputPin = 11;// Package pin 17
 
 //**********************************************************************************
 
@@ -99,10 +99,11 @@ int loopCounter = 0;
 double sensorSmoothed = 0;
 int dimStep = 0;      // Dimming PWM counter, cycles from 1 to 10
 int dimFactor = 0;    // Current dimming factor, update once per loop
+int dimSteps = (int) DIM_STEPS;
 
 // Used for special mappings of the 74141 -> digit (wiring aid)
 const int decodeDigit[16] = {0,1,2,3,4,5,6,7,8,9,10,10,10,10,10,10};
-const int PWMDimFunction[10] = {0,2,10,20,30,40,50,80,120,255};
+const int PWMDimFunction[20] = {0,2,5,10,15,20,25,30,40,50,60,70,80,90,100,110,120,130,160,255};
 
 // Time initial values, overwritten on startup if an RTC is there
 byte hours = 12;
@@ -111,7 +112,12 @@ byte secs = 0;
 byte days = 1;
 byte months = 1;
 byte years = 14;
-long lastCheckTimeMs = 0;
+unsigned long lastCheckTimeMs = 0;
+
+// ********************** PIR blanking management **********************
+unsigned long lastSeenPir = 0;
+boolean pirBlanked = false;
+const long PIR_TIMEOUT = 300000;
 
 // ********************** Input switch management **********************
 int  button1PressedCount = 0;
@@ -150,7 +156,7 @@ void setup()
   pinMode(ledPin_0_a, OUTPUT);      
   pinMode(ledPin_0_b, OUTPUT);      
   pinMode(ledPin_0_c, OUTPUT);      
-  pinMode(ledPin_0_d, OUTPUT);    
+  pinMode(ledPin_0_d, OUTPUT);
 
   // Set the driver pin to putput
   pinMode(hvDriverPin, OUTPUT);
@@ -162,14 +168,16 @@ void setup()
   pinMode(inputPin2, INPUT ); // set the input pin 1
   digitalWrite(inputPin1, HIGH );
   digitalWrite(inputPin2, HIGH );
-  
-  pinMode(tickLed, OUTPUT);     
- 
+
+  pinMode(tickLed, OUTPUT);
+
+  pinMode(pirInputPin, INPUT ); // set the input pin for the motion sensor
+
   /* disable global interrupts while we set up them up */
   cli();
-  
+
   // **************************** HV generator ****************************
-  
+
   // Enable timer 1 Compare Output channel A in reset mode: TCCR1A.COM1A1 = 1, TCCR1A.COM1A0 = 0
   TCCR1A = bit(COM1A1);
 
@@ -213,24 +221,29 @@ void loop()
   // Check button, we evaluate below
   checkButton1();
   checkButton2();
-  
-  long timeMs = millis() - lastCheckTimeMs;
+
+  unsigned long timeMs = millis() - lastCheckTimeMs;
   if (timeMs % 2000 >= 1000) {
     int tickLedPWMVal = PWMDimFunction[dimFactor];
     analogWrite(tickLed, tickLedPWMVal);
   } else {
     analogWrite(tickLed, 0);
   }
-  
+
   // Update the time buffer when we are starting a new readout
   if (loopCounter ==  0) {
-    
+
     getRTCTime();
-    
-    dimFactor = getDimmingFromLDR();
-    
+
     lastCheckTimeMs = millis();
-    
+
+    if (digitalRead(pirInputPin) == 1) {
+      lastSeenPir = lastCheckTimeMs;
+    }
+
+    pirBlanked = ((lastCheckTimeMs - lastSeenPir) > PIR_TIMEOUT);
+    digitalWrite(tickLed, pirBlanked);
+  
     if (button1Press) {
       mins = mins + 1;
       if (mins >= MINS_MAX) {
@@ -248,16 +261,18 @@ void loop()
       setRTC();
     }
   }
-  
+
   checkHVVoltage();
 
-  if (blanked) {
+  dimFactor = getDimmingFromLDR();
+
+  if (blanked || pirBlanked) {
     digitalWrite(anode1, 0);
-  } 
+  }
   else {
-    // perform dimming via 10 step PWM
+    // perform dimming via 20 step PWM
     dimStep++;
-    if (dimStep > 10) dimStep = 1;
+    if (dimStep >= dimSteps) dimStep = 1;
     if (dimFactor >= dimStep) {
       digitalWrite(anode1, 1);
     } else {
@@ -269,30 +284,30 @@ void loop()
   if (loopCounter == digit1Start) {
     blanked = false;
     SetSN74141Chip(hours / 10);
-  } 
+  }
 
   if (loopCounter == digit1End) {
     blanked = true;
-  } 
-  
+  }
+
   if (loopCounter == digit2Start) {
     blanked = false;
     SetSN74141Chip(hours % 10);
-  } 
+  }
 
   if (loopCounter == digit2End) {
     blanked = true;
-  } 
-  
+  }
+
   if (loopCounter == digit3Start) {
     blanked = false;
     SetSN74141Chip(mins / 10);
-  } 
+  }
 
   if (loopCounter == digit3End) {
     blanked = true;
-  } 
-  
+  }
+
   if (loopCounter == digit4Start) {
     blanked = false;
     SetSN74141Chip(mins % 10);
@@ -318,10 +333,10 @@ void loop()
 void SetSN74141Chip(int num1)
 {
   int a,b,c,d;
-  
+
   // Load the a,b,c,d.. to send to the SN74141 IC
   int decodedDigit = decodeDigit[num1];
-  
+
   switch( decodedDigit )
   {
     case 0: a=0;b=0;c=0;d=0;break;
@@ -335,8 +350,8 @@ void SetSN74141Chip(int num1)
     case 8: a=0;b=0;c=0;d=1;break;
     case 9: a=1;b=0;c=0;d=1;break;
     default: a=1;b=1;c=1;d=1;break;
-  }  
-  
+  }
+
   // Write to output pins.
   setDigit(d,c,b,a);
 }
@@ -362,7 +377,7 @@ double checkHVVoltage() {
 
   if (externalVoltage > 160) {
     TCCR1A = tccrOff;
-  } 
+  }
   else {
     TCCR1A = tccrOn;
   }
@@ -379,7 +394,7 @@ void checkButton1() {
   if (digitalRead(inputPin1) == BUTTON_ACTIVE) {
     button1WasReleased = false;
 
-    // We need consecutive pressed counts to treat this is pressed    
+    // We need consecutive pressed counts to treat this is pressed
     if (button1PressedCount < debounceCounter1) {
       button1PressedCount += 1;
       // If we reach the debounce point, mark the start time
@@ -393,19 +408,19 @@ void checkButton1() {
         button1Press2S = true;
         button1Press1S = true;
         button1Press = true;
-      } 
+      }
       else if ((millis() - button1PressStartMillis) > 1000) {
         button1Press2S = false;
         button1Press1S = true;
         button1Press = true;
-      } 
+      }
       else {
         button1Press2S = false;
         button1Press1S = false;
         button1Press = true;
       }
     }
-  } 
+  }
   else {
     // mark this as a press and release if we were pressed for less than a long press
     if (button1PressedCount == debounceCounter1) {
@@ -426,10 +441,10 @@ void checkButton1() {
       }
     }
 
-    // Reset the switch flags debounce counter      
+    // Reset the switch flags debounce counter
     button1Press2S = false;
     button1Press1S = false;
-    button1Press = false;      
+    button1Press = false;
     button1PressedCount = 0;
   }
 }
@@ -482,7 +497,7 @@ boolean is1PressedRelease1S() {
   if (button1PressRelease1S) {
     button1PressRelease1S = false;
     return true;
-  } 
+  }
   else {
     return false;
   }
@@ -495,7 +510,7 @@ boolean is1PressedRelease2S() {
   if (button1PressRelease2S) {
     button1PressRelease2S = false;
     return true;
-  } 
+  }
   else {
     return false;
   }
@@ -517,26 +532,26 @@ void checkButton2() {
       if (button2PressedCount == debounceCounter2) {
         button2PressStartMillis = millis();
       }
-    } 
+    }
     else {
       // We are pressed and held, maintain the press states
       if ((millis() - button2PressStartMillis) > 2000) {
         button2Press2S = true;
         button2Press1S = true;
         button2Press = true;
-      } 
+      }
       else if ((millis() - button2PressStartMillis) > 1000) {
         button2Press2S = false;
         button2Press1S = true;
         button2Press = true;
-      } 
+      }
       else {
         button2Press2S = false;
         button2Press1S = false;
         button2Press = true;
       }
     }
-  } 
+  }
   else {
     // mark this as a press and release if we were pressed for less than a long press
     if (button2PressedCount == debounceCounter2) {
@@ -548,19 +563,19 @@ void checkButton2() {
 
       if (button2Press2S) {
         button2PressRelease2S = true;
-      } 
+      }
       else if (button2Press1S) {
         button2PressRelease1S = true;
-      } 
+      }
       else if (button2Press) {
         button2PressRelease = true;
       }
     }
 
-    // Reset the switch flags debounce counter      
+    // Reset the switch flags debounce counter
     button2Press2S = false;
     button2Press1S = false;
-    button2Press = false;      
+    button2Press = false;
     button2PressedCount = 0;
   }
 }
@@ -600,7 +615,7 @@ boolean is2PressedRelease() {
   if (button2PressRelease) {
     button2PressRelease = false;
     return true;
-  } 
+  }
   else {
     return false;
   }
@@ -613,7 +628,7 @@ boolean is2PressedRelease1S() {
   if (button2PressRelease1S) {
     button2PressRelease1S = false;
     return true;
-  } 
+  }
   else {
     return false;
   }
@@ -626,7 +641,7 @@ boolean is2PressedRelease2S() {
   if (button2PressRelease2S) {
     button2PressRelease2S = false;
     return true;
-  } 
+  }
   else {
     return false;
   }
@@ -662,13 +677,6 @@ void getRTCTime() {
   days=Clock.getDate();
 }
 
-// ************************************************************
-// Get the temperature from the RTC
-// ************************************************************
-float getRTCTemp() {
-  return Clock.getTemperature();
-}
-
 // ******************************************************************
 // Check the ambient light through the LDR (Light Dependent Resistor)
 // Smooths the reading over several reads.
@@ -677,21 +685,27 @@ float getRTCTemp() {
 // total darkness is around 900.
 // 
 // The return value is the dimming count we are using.
-// This is a value from 1 to 10, which controls a PWM value.
+// This is a value from 1 to DIM_STEPS, which controls a PWM value.
 // ******************************************************************
 int getDimmingFromLDR() {
   int rawSensorVal = 1023-analogRead(LDRPin);
   if (rawSensorVal < SENSOR_LOW_VALUE) rawSensorVal = SENSOR_LOW_VALUE;
   if (rawSensorVal > SENSOR_HIGH_VALUE) rawSensorVal = SENSOR_HIGH_VALUE;
-  
+
   // Smooth the value
-  double sensorDiff = rawSensorVal - sensorSmoothed;
-  sensorSmoothed += (sensorDiff/SENSOR_SMOOTH_READINGS_DEFAULT);
-  
-  // Normalise it in the range 1-10
-  double sensorSmoothedResult = ((sensorSmoothed - SENSOR_LOW_VALUE) / SENSOR_RANGE) * 9.0;  
-  int returnValue = (int) (sensorSmoothedResult + 1);
-  
+  if (rawSensorVal > sensorSmoothed) {
+     sensorSmoothed += 1;
+  } else {
+     sensorSmoothed -= 1;
+  }
+
+  // Normalise it in the range 1 to DIM_STEPS
+  double sensorSmoothedResult = ((sensorSmoothed - SENSOR_LOW_VALUE) / SENSOR_RANGE) * DIM_STEPS;
+
+  int returnValue = (int) sensorSmoothedResult;
+
+  if (returnValue < 1) returnValue = 1;
+
   return returnValue;
 }
 
